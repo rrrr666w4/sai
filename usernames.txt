@@ -1,0 +1,4 @@
+# Ek username per line likho (bina @ ke, lekin @ likha to bhi chal jayega)
+# Sirf PUBLIC accounts kaam karenge
+# example_public_account1
+# example_public_account2
