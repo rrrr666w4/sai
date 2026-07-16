@@ -23,7 +23,15 @@ jobs:
       - name: Install yt-dlp
         run: pip install -U yt-dlp
 
+      - name: Test proxy connectivity
+        env:
+          PROXY_URL: ${{ secrets.WEBSHARE_PROXY_URL }}
+        run: |
+          curl --proxy "$PROXY_URL" https://ipv4.webshare.io/ -v --max-time 15
+
       - name: Run public reels scraper
+        env:
+          PROXY_URL: ${{ secrets.WEBSHARE_PROXY_URL }}
         run: python public_reels_scraper.py
 
       - name: Commit & push new reels
