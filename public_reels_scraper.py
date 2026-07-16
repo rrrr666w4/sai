@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
 """
-Instagram Public Reels Downloader (NO LOGIN / NO SESSION)
+Instagram Public Reels Downloader (NO LOGIN / NO SESSION, rotating proxy)
 - Reads usernames from usernames.txt
 - Downloads recent reels from each PUBLIC profile using yt-dlp
+- Routes requests through a rotating proxy (PROXY_URL env var) to avoid
+  Instagram's datacenter-IP blocking
+- Retries a username a few times (proxy rotates IP each request, so a
+  retry often gets a fresh, unblocked IP)
 - Saves videos into scraped_reels/videos/<username>/
 - Saves metadata into scraped_reels/reels_metadata.json
-- Skips usernames that fail (private account / blocked / login wall)
+- Skips usernames that still fail after retries (private account / genuinely blocked)
 
 Limitations (read SETUP_GUIDE.md):
 - Only works for public accounts
-- Instagram frequently rate-limits/blocks unauthenticated requests,
-  especially from datacenter IPs like GitHub Actions runners
-- No guarantee of consistent success run to run
+- No guarantee of consistent success run to run, even with a proxy
 """
 
 import json
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -25,7 +29,9 @@ VIDEOS_DIR = BASE_DIR / "videos"
 METADATA_FILE = BASE_DIR / "reels_metadata.json"
 USERNAMES_FILE = Path("usernames.txt")
 
-MAX_REELS_PER_USER = 5  # per username, per run
+MAX_REELS_PER_USER = 5   # per username, per run
+MAX_RETRIES = 3          # retries per username (proxy gives a new IP each time)
+RETRY_DELAY_SECONDS = 8  # wait between retries
 
 VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -51,10 +57,7 @@ def read_usernames() -> list:
     return [u.strip().lstrip("@") for u in lines if u.strip() and not u.strip().startswith("#")]
 
 
-def download_user_reels(username: str, metadata: list, known_ids: set) -> int:
-    user_dir = VIDEOS_DIR / username
-    user_dir.mkdir(parents=True, exist_ok=True)
-
+def build_ytdlp_cmd(username, user_dir, proxy_url):
     profile_url = f"https://www.instagram.com/{username}/reels/"
 
     cmd = [
@@ -62,15 +65,38 @@ def download_user_reels(username: str, metadata: list, known_ids: set) -> int:
         "--playlist-end", str(MAX_REELS_PER_USER),
         "--print", "%(id)s|||%(webpage_url)s|||%(description)s|||%(like_count)s|||%(view_count)s|||%(timestamp)s",
         "-o", str(user_dir / "%(id)s.%(ext)s"),
-        profile_url,
     ]
 
-    print(f"🔍 @{username} ki public reels try kar rahe hain...")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if proxy_url:
+        cmd += ["--proxy", proxy_url]
 
-    if result.returncode != 0:
-        print(f"⚠️ @{username} fail ho gaya (private / blocked / login-wall). Skip kar rahe hain.")
-        print(f"   Detail: {result.stderr.strip()[:200]}")
+    cmd.append(profile_url)
+    return cmd
+
+
+def download_user_reels(username, metadata, known_ids, proxy_url):
+    user_dir = VIDEOS_DIR / username
+    user_dir.mkdir(parents=True, exist_ok=True)
+
+    cmd = build_ytdlp_cmd(username, user_dir, proxy_url)
+
+    result = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        print(f"🔍 @{username} try kar rahe hain (attempt {attempt}/{MAX_RETRIES})...")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+
+        if result.returncode == 0:
+            break
+
+        err = result.stderr.strip()
+        print(f"⚠️ Attempt {attempt} fail: {err[:200]}")
+
+        if attempt < MAX_RETRIES:
+            print(f"⏳ {RETRY_DELAY_SECONDS}s wait kar ke proxy IP rotate hone dete hain...")
+            time.sleep(RETRY_DELAY_SECONDS)
+
+    if result is None or result.returncode != 0:
+        print(f"❌ @{username} sab retries ke baad bhi fail (private / genuinely blocked). Skip.")
         return 0
 
     new_count = 0
@@ -104,9 +130,15 @@ def main():
     metadata = load_json(METADATA_FILE, [])
     known_ids = {m["reel_id"] for m in metadata}
 
+    proxy_url = os.environ.get("PROXY_URL")
+    if proxy_url:
+        print("🔁 Rotating proxy active hai.")
+    else:
+        print("⚠️ PROXY_URL set nahi hai — direct connection use hoga (IP block ka risk zyada).")
+
     total_new = 0
     for username in usernames:
-        total_new += download_user_reels(username, metadata, known_ids)
+        total_new += download_user_reels(username, metadata, known_ids, proxy_url)
         save_json(METADATA_FILE, metadata)  # save progressively in case later usernames fail
 
     print(f"\n📊 Total naye reels is run mein: {total_new}")
